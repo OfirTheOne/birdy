@@ -1,12 +1,35 @@
 import 'phaser';
-import {config} from '../config';
+import { Socket } from 'socket.io';
+import { config } from '../config';
 import { Dictionary } from 'ts-essentials';
 import { Body } from 'matter-js';
 import { MultiKey } from '../utils/multi-key';
+import { Game, Scene } from 'phaser';
+import { TransferredPlayer } from '../models/transferred-player';
+import { BombObject } from './bomb.object';
 
-const playerConfig  = config['GAME_OBJECT']['BIRD_PLAYER'];
+const playerConfig = config['GAME_OBJECT']['BIRD_PLAYER'];
+
+
+
+export class PlayerObjectResourceLoader {
+    static load(scene: Phaser.Scene) {
+        scene.load.spritesheet('bird',
+            './../assets/sprite-sheet-bird-build-scale.png',
+            { frameWidth: 100, frameHeight: 68, }
+        );
+    }
+}
 
 export class PlayerObject {
+
+    lastEmittedX: number;
+    lastEmittedY: number;
+
+    public isCurrentUser: boolean;
+    // public socket: Socket;
+    public playerName: string;
+    public playerNameObject: Phaser.GameObjects.Text;
 
     /** @description
      * the plyer sprite object.
@@ -30,22 +53,31 @@ export class PlayerObject {
     /** @description
      * keys using to control the player sprite.
      */
-    private keys: { leftInput: MultiKey; rightInput: MultiKey; jumpInput: MultiKey; runInput: MultiKey };
+    private keys: { 
+        leftInput: MultiKey; 
+        rightInput: MultiKey; 
+        jumpInput: MultiKey; 
+        runInput: MultiKey, 
+        fireInput: MultiKey  
+    };
 
     /** @description
      * 'canJump' flag is the sprite can jump.
      */
     private canJump: boolean;
 
+    private canFire: boolean;
     /** @description
      * 'jumpCooldownTimer' event object, set the 'canJump' flag to true after 
      * a delay from the last jump action.
      */
     private jumpCooldownTimer: Phaser.Time.TimerEvent;
+    private fireCoolDownTimer: Phaser.Time.TimerEvent;
 
-    constructor(private scene: Phaser.Scene, options: PlayerObjectOptions) {
-        const { spriteKey, x, y, depth } = options;
-
+    
+    constructor(private scene: Phaser.Scene, options: PlayerObjectOptions, private socket: Socket) {
+        const { spriteKey = playerConfig.SPRITE_KEY, x, y, depth, currentUser = true } = options;
+        this.isCurrentUser = currentUser;
         // Create the physics-based sprite that we will move around and animate
         this.setupSprite(spriteKey, x, y);
         this.setSpriteAnims(this.scene, spriteKey);
@@ -54,6 +86,7 @@ export class PlayerObject {
         this.initKeysInput();
 
         this.canJump = true;
+        this.canFire = true;
         this.listenToCollisionEvents();
         this.scene.events.on("update", this.update, this);
         this.scene.events.once("shutdown", this.destroy, this);
@@ -66,24 +99,125 @@ export class PlayerObject {
         if (this.isDestroyed) {
             return;
         }
+        const { 
+            isJumpKeyDown,
+            isLeftKeyDown,
+            isRightKeyDown,
+            isFireKeyDown,
+            isPlayerOnGround,
+            moveForce,
+            velocity,
+            x,
+            y
+        } =  this.getTransferredPlayerData();
         const sprite = this.sprite;
-        const velocity = sprite.body['velocity'];
+        // const velocity = sprite.body?.['velocity'];
+        // const isPlayerOnGround = this.isTouching.ground;
+        // const isRunning = this.keys.runInput.isDown();
+        // const moveForce =
+        //     (isRunning && isPlayerOnGround) ? (playerConfig.BASIC_MOVE_FORCE) * 2 : // whan runnig make moving ligther
+        //         (!isPlayerOnGround ? playerConfig.BASIC_MOVE_FORCE * 0.2 : // on the air make moving heavier
+        //             playerConfig.BASIC_MOVE_FORCE); // on the ground & not running move normal
+
+        if(this.isCurrentUser) {
+
+            if(isFireKeyDown && this.canFire) {
+                this.canFire = false;
+                new BombObject(this.scene, {x, y: (y + this.sprite.height)}, this.socket);
+                    // sprite.setVelocityY(-playerConfig.JUMP_VERTICAL_VELOCITY);
+                this.fireCoolDownTimer = this.scene.time.addEvent({
+                    delay: playerConfig.DELAY_MS_BETWEEN_JUMPS,
+                    callback: () => (this.canFire = true)
+                });
+                
+            }
+
+            if((this.lastEmittedX != sprite.x) || (this.lastEmittedY != sprite.y) || this.anyKeyDown()) {
+                this.emitPlayerData(this.getTransferredPlayerData())
+            }
+            this.applyPlayerMovement(
+                sprite, 
+                isLeftKeyDown,
+                isRightKeyDown,
+                isJumpKeyDown,
+                isPlayerOnGround,
+                moveForce,
+                velocity
+            )
+        }
+    }
+
+    public getTransferredPlayerData(): TransferredPlayer {
+
+        const sprite = this.sprite;
+        
+        const velocity = sprite.body?.['velocity'];
         const isPlayerOnGround = this.isTouching.ground;
         const isRunning = this.keys.runInput.isDown();
-        debugger
+
         const moveForce =
             (isRunning && isPlayerOnGround) ? (playerConfig.BASIC_MOVE_FORCE) * 2 : // whan runnig make moving ligther
                 (!isPlayerOnGround ? playerConfig.BASIC_MOVE_FORCE * 0.2 : // on the air make moving heavier
                     playerConfig.BASIC_MOVE_FORCE); // on the ground & not running move normal
 
-        if (this.keys.leftInput.isDown()) {
+                    
+        const position = sprite.body?.['position'];
+        const { x,y } = position ?  sprite : { x: 0, y: 0 }
+        return {
+            isJumpKeyDown: this.keys.jumpInput.isDown(),
+            isLeftKeyDown: this.keys.leftInput.isDown(),
+            isRightKeyDown: this.keys.rightInput.isDown(),
+            isFireKeyDown: this.keys.fireInput.isDown(),
+            isPlayerOnGround,
+            moveForce,
+            velocity,
+            name: this.playerName,
+            x,
+            y
+        }
+    }
+
+    public syncPlayer(data: TransferredPlayer) {
+
+        if(!this.isCurrentUser) {
+            this.sprite.setX(data.x)
+            this.sprite.setY(data.y)
+            this.applyPlayerMovement(
+                this.sprite,
+                data.isLeftKeyDown,
+                data.isRightKeyDown,
+                data.isJumpKeyDown,
+                data.isPlayerOnGround,
+                data.moveForce,
+                data.velocity
+            )
+
+        }
+    }
+    private applyPlayerMovement(
+        sprite: Phaser.Physics.Matter.Sprite,
+        leftKeyDown: boolean,
+        rightKeyDown: boolean,
+        jumpKeyDown: boolean,
+        isPlayerOnGround: boolean,
+        moveForce: number,
+        velocity?: any,
+    ) {
+        if(!this.isCurrentUser) {
+            // debugger;
+        }
+
+        if(!this.anyKeyDown()) {
+            sprite.anims.play('move-left', true);
+        }
+        if (leftKeyDown) {
             const animsKey = isPlayerOnGround ? 'move-left' : 'pose-left'
             sprite.anims.play('move-left', true);
             sprite.setFlipX(true);
 
             sprite.applyForce({ x: -moveForce, y: 0 } as Phaser.Math.Vector2);
 
-        } else if (this.keys.rightInput.isDown()) {
+        } else if (rightKeyDown) {
             const animsKey = isPlayerOnGround ? 'move-right' : 'pose-right'
             sprite.anims.play('move-right', true);
             sprite.setFlipX(false);
@@ -95,7 +229,7 @@ export class PlayerObject {
             sprite.anims.play('turn', true);
         }
 
-        if (this.keys.jumpInput.isDown() && isPlayerOnGround && this.canJump) {
+        if (jumpKeyDown /* && isPlayerOnGround && this.canJump */) {
             sprite.setVelocityY(-playerConfig.JUMP_VERTICAL_VELOCITY);
             this.canJump = false;
             this.jumpCooldownTimer = this.scene.time.addEvent({
@@ -103,24 +237,19 @@ export class PlayerObject {
                 callback: () => (this.canJump = true)
             });
         }
-        if (this.keys.jumpInput.isDown()) {
-            sprite.setVelocityY(-playerConfig.JUMP_VERTICAL_VELOCITY);
-            this.canJump = false;
-            this.jumpCooldownTimer = this.scene.time.addEvent({
-                delay: playerConfig.DELAY_MS_BETWEEN_JUMPS,
-                callback: () => (this.canJump = true)
-            });
-        }
+        
 
         // limit horizontal speed
-        if (velocity.x > playerConfig.THRESHOLD_HORIZONTAL_VELOCITY) {
-            sprite.setVelocityX(playerConfig.THRESHOLD_HORIZONTAL_VELOCITY);
-        }
-        else if (velocity.x < -playerConfig.THRESHOLD_HORIZONTAL_VELOCITY) {
-            sprite.setVelocityX(-playerConfig.THRESHOLD_HORIZONTAL_VELOCITY);
+        if(velocity != undefined) {
+            if (velocity.x > playerConfig.THRESHOLD_HORIZONTAL_VELOCITY) {
+                sprite.setVelocityX(playerConfig.THRESHOLD_HORIZONTAL_VELOCITY);
+            }
+            else if (velocity.x < -playerConfig.THRESHOLD_HORIZONTAL_VELOCITY) {
+                sprite.setVelocityX(-playerConfig.THRESHOLD_HORIZONTAL_VELOCITY);
+            }
+
         }
     }
-
     public destroy() {
         if (this.scene.matter.world) {
             this.scene.matter.world.off("beforeupdate", this.resetTuching, this, false);
@@ -131,12 +260,20 @@ export class PlayerObject {
         if (this.jumpCooldownTimer) {
             this.jumpCooldownTimer.destroy()
         };
+        if (this.fireCoolDownTimer) {
+            this.fireCoolDownTimer.destroy()
+        };
 
         this.scene.events.off("update", this.update, this, false);
         this.scene.events.off("shutdown", this.destroy, this, false);
         this.scene.events.off("destroy", this.destroy, this, false);
 
         this.isDestroyed = true;
+
+        if (this.playerNameObject && this.playerNameObject.destroy) {
+            this.playerNameObject.destroy()
+        }
+
         this.sprite.destroy();
     }
 
@@ -151,21 +288,30 @@ export class PlayerObject {
             || body === this.sensors.right;
     }
 
+
+
     // #endregion
 
 
+    private anyKeyDown() {
+        const anyKeyDown = (
+            this.keys.leftInput.isDown() || 
+            this.keys.rightInput.isDown() ||
+            this.keys.jumpInput.isDown());
+        return anyKeyDown;
+    }
     private initKeysInput() {
-        const { LEFT, RIGHT, UP, A, D, W, SHIFT } = Phaser.Input.Keyboard.KeyCodes;
+        const { LEFT, RIGHT, UP, A, D, W, SHIFT, SPACE } = Phaser.Input.Keyboard.KeyCodes;
         this.keys = {
             leftInput: new MultiKey(this.scene, [LEFT, A]),
             rightInput: new MultiKey(this.scene, [RIGHT, D]),
             jumpInput: new MultiKey(this.scene, [UP, W]),
-            runInput: new MultiKey(this.scene, [SHIFT])
+            runInput: new MultiKey(this.scene, [SHIFT]),
+            fireInput: new MultiKey(this.scene, [SPACE]),
         }
     }
 
     private setupSprite(spriteKey: string, x: number, y: number) {
-        debugger;
         this.sprite = this.scene.matter.add.sprite(10, 10, spriteKey, 0);
 
         const { width, height } = this.sprite;
@@ -178,7 +324,6 @@ export class PlayerObject {
 
     private createSpriteBody(width: number, height: number): MatterJS.Body {
         // Native Matter modules, Matter.Body Matter.Bodies fail type checking 
-        debugger;
         const { Bodies, Body } = Phaser.Physics.Matter['Matter'];
         const mainBody = Bodies.rectangle(0, 0, width * 0.7, height * 0.9, { chamfer: { radius: 10 } });
         this.sensors = {
@@ -317,11 +462,62 @@ export class PlayerObject {
         });
     }
 
+    public emitPlayerData(transferredPlayerData: TransferredPlayer) {
+        // Emit the 'move-player' event, updating the player's data on the server
+        this.socket.emit('move-player', transferredPlayerData
+        /*
+        {
+            x: this.sprite.x,
+            y: this.sprite.y,
+            angle: this.sprite.rotation,
+            playerName: {
+                name: this.playerName//.text,
+                // x: this.playerName.x,
+                // y: this.playerName.y
+            },
+            //   speed: {
+            //     value: this.speed,
+            //     x: this.speedText.x,
+            //     y: this.speedText.y
+            //   }
+        }*/
+        )
+    }
+
+    public static createText(game: Scene, { x, y }, text: string) {
+        return game.add.text(x, y, text, {
+            fontSize: '12px',
+            fill: '#FFF',
+            align: 'center'
+        })
+    }
+
+    public updatePlayerName(name = this.socket.id, x = this.sprite.x - 57, y = this.sprite.y - 59) {
+        // Updates the player's name text and position
+        this.playerNameObject.text = String(name)
+        this.playerNameObject.x = x
+        this.playerNameObject.y = y
+        // Bring the player's name to top
+        // this.scene.matter.world..bringToTop(this.playerName)
+    }
+    public updatePlayerStatusText(status, x, y, text) {
+        // // Capitalize the status text
+        // const capitalizedStatus = status[0].toUpperCase() + status.substring(1)
+        // let newText = ''
+        // // Set the speed text to either 0 or the current speed
+        // this[status] < 0 ? this.newText = 0 : this.newText = this[status]
+        // // Updates the text position and string
+        // text.x = x
+        // text.y = y
+        // text.text = `${capitalizedStatus}: ${parseInt(this.newText)}`
+        // game.world.bringToTop(text)
+    }
 }
 
-interface PlayerObjectOptions {
-    spriteKey: string, 
-    x: number, 
+export interface PlayerObjectOptions {
+    spriteKey?: string,
+    x: number,
     y: number,
-    depth?: number
+    depth?: number,
+    currentUser?: boolean
 }

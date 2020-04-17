@@ -26,12 +26,22 @@
     "webpack-dev-server": "3.7.2"
   },
   "dependencies": {
+    "@types/body-parser": "^1.19.0",
     "@types/config": "0.0.36",
+    "@types/cors": "^2.8.6",
+    "@types/express": "^4.17.6",
     "@types/matter-js": "^0.14.2",
+    "@types/socket.io": "^2.1.4",
+    "body-parser": "^1.19.0",
     "config": "^3.3.1",
+    "cors": "^2.8.5",
+    "express": "^4.17.1",
     "matter-js": "^0.14.2",
     "phaser": "3.20.1",
+    "phaser3-rex-plugins": "^1.1.11",
+    "socket.io": "^2.3.0",
     "ts-essentials": "^6.0.4",
+    "ts-node": "^8.8.2",
     "ts-toolbelt": "^6.4.2"
   },
   "scripts": {
@@ -39,7 +49,8 @@
     "build-game": "cd src/game && npm install && npm run build",
     "start-boilerplate": "cd src/boilerplate && yarn install && yarn run dev",
     "build-boilerplate": "cd src/boilerplate && yarn install && yarn run build",
-    "dev": "webpack --mode development && webpack-dev-server --mode development",
+    "start-server": "ts-node ./server/index.ts",
+    "dev": "webpack --mode development && webpack-dev-server --host 0.0.0.0 --open ",
     "build": "webpack --mode production && webpack-dev-server --mode production",
     "candy-crush": "cd src/games/candy-crush && npm install && npm run dev",
     "raycasting": "cd src/experimental/raycasting && yarn install && yarn run dev",
