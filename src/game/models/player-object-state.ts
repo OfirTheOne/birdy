@@ -1,4 +1,4 @@
-export interface TransferredPlayer {
+export interface PlayerObjectState {
 
     x: number;
     y: number;
@@ -10,6 +10,6 @@ export interface TransferredPlayer {
     isLeftKeyDown: boolean;
     isRightKeyDown: boolean;
     isJumpKeyDown: boolean;
-    isFireKeyDown: boolean;
+    needToFire: boolean;
     name: string;
 }

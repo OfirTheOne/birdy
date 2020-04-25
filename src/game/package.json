@@ -29,7 +29,7 @@
     "phaser": "3.20.1"
   },
   "scripts": {
-    "dev": "webpack --mode development && webpack-dev-server --host 0.0.0.0 --open",
+    "dev": "webpack --mode development && webpack-dev-server --https false --host 0.0.0.0  --open --port 3000",
     "build": "webpack --mode production && webpack-dev-server --mode production"
   },
   "repository": {

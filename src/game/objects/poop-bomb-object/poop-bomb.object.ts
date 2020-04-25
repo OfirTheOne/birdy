@@ -1,22 +1,23 @@
 import 'phaser';
 import { Socket } from 'socket.io';
-import { config } from '../config';
+import { config } from '../../config';
 import { Dictionary } from 'ts-essentials';
 import { Body } from 'matter-js';
-import { MultiKey } from '../utils/multi-key';
-import { Game, Scene } from 'phaser';
-import { TransferredPlayer } from '../models/transferred-player';
+import { MultiKey } from '../../utils/multi-key';
+import { Game, Scene } from 'phaser'; 
+import { PoopBombObjectState } from '../../models/poop-bomb-object-state';
+import { DelayAction, SequentialDelayActions } from '../../utils/async-actions';
 
-const playerConfig = config['GAME_OBJECT']['BIRD_PLAYER'];
+const bombConfig = config['GAME_OBJECT']['POOP_BOMB'];
 
 
-export class BombObjectResourceLoader {
+export class PoopBombObjectResourceLoader {
 
 
     static load(scene: Phaser.Scene) {
 
             // Load body shapes from JSON file generated using PhysicsEditor
-        scene.load.json('bomb-object-shapes', './../assets/physics/drop-bomb.json');
+        scene.load.json('bomb-object-shapes', './../assets/poop-bomb-shape/drop-bomb.json');
 
         scene.load.spritesheet(
             'bomb-drop', 
@@ -32,13 +33,14 @@ export class BombObjectResourceLoader {
     }
 }
 
-export class BombObject {
+export class PoopBombObject {
 
     lastEmittedX: number;
     lastEmittedY: number;
 
 
-    private hitAccrued: boolean;
+    private hitAccrued: boolean = false;
+    private blastDispatch: boolean = false;
 
     private shapes: {[key: string]: any};
     public isCurrentUser: boolean;
@@ -46,14 +48,9 @@ export class BombObject {
     public playerName: string;
     public playerNameObject: Phaser.GameObjects.Text;
 
-    /** @description
-     * the plyer sprite object.
-     */
+
     public sprite: Phaser.Physics.Matter.Sprite;
 
-    /** @description
-     * 'sensors' / MatterJS.Body scrounging the sprite object to trace collisions.
-     */
     public sensors: { bottom: Body, left: Body, right: Body, top: Body };
 
     /** @description
@@ -63,18 +60,22 @@ export class BombObject {
     private isTouching = { left: false, right: false, ground: false };
 
     // ...
-    private isDestroyed = false;
+    public isDestroyed = false;
 
 
-    private selfDestroyOnHitTimer: Phaser.Time.TimerEvent;
+    // private selfDestroyOnHitTimer: Phaser.Time.TimerEvent;
+    private selfDestroyDelayAction: DelayAction;
 
-    constructor(private scene: Phaser.Scene, options: PlayerObjectOptions, private socket: Socket) {
+    
+    private blastDispatchTimer: Phaser.Time.TimerEvent;
+
+    constructor(private scene: Phaser.Scene, options: ObjectOptions, private socket: Socket) {
         const { spriteKey = 'bomb-blast', x, y, depth, currentUser = true } = options;
         this.shapes = this.scene.cache.json.get('bomb-object-shapes');
         this.isCurrentUser = currentUser;
         this.hitAccrued = false;
 
-        this.setupSprite(spriteKey, x, y);
+        this.setupSprite(spriteKey, this.shapes['bomb-drop'], x, y);
         this.setSpriteAnims(this.scene, 'bomb-blast');
         this.listenToCollisionEvents();
 
@@ -82,6 +83,7 @@ export class BombObject {
         this.scene.events.once("shutdown", this.destroy, this);
         this.scene.events.once("destroy", this.destroy, this);
 
+        this.selfDestroyDelayAction = new DelayAction(bombConfig['DELAY_MS_DESTROY_AFTER_BLAST'])
     }
 
     // #region - Basic Public Player Methods -
@@ -91,28 +93,25 @@ export class BombObject {
             return;
         }
         const { 
-            isPlayerOnGround,
+            hitAccrued,
+            isDisposed,
             velocity,
             x,
             y
-        } =  this.getTransferredPlayerData();
+        } =  this.getObjectState();
         const sprite = this.sprite;
 
         if(this.isCurrentUser) {
-
-
-            // if((this.lastEmittedX != sprite.x) || (this.lastEmittedY != sprite.y) || this.anyKeyDown()) {
-            //     this.emitPlayerData(this.getTransferredPlayerData())
-            // }
-            this.applyPlayerMovement(
+            this.applyObjectState(
                 sprite, 
-                isPlayerOnGround,
+                hitAccrued,
+                isDisposed,
                 velocity
             )
         }
     }
 
-    public getTransferredPlayerData() {
+    public getObjectState(): PoopBombObjectState {
 
         const sprite = this.sprite;
         
@@ -123,8 +122,8 @@ export class BombObject {
         const position = sprite.body?.['position'];
         const { x,y } = position ?  sprite : { x: 0, y: 0 }
         return {
-
-            isPlayerOnGround,
+            hitAccrued: this.hitAccrued,
+            isDisposed: this.isDestroyed,
             velocity,
             name: this.playerName,
             x,
@@ -132,24 +131,15 @@ export class BombObject {
         }
     }
 
-    public syncPlayer(data: TransferredPlayer) {
-
-        if(!this.isCurrentUser) {
-            this.sprite.setX(data.x)
-            this.sprite.setY(data.y)
-            this.applyPlayerMovement(
-                this.sprite,
-                data.isPlayerOnGround,
-                data.velocity
-            )
-
-        }
-    }
-    private applyPlayerMovement(
+     private applyObjectState(
         sprite: Phaser.Physics.Matter.Sprite,
-        isPlayerOnGround: boolean,
+        hitAccrued: boolean,
+        isDisposed: boolean,
         velocity?: any,
     ) {
+        if(hitAccrued && !isDisposed) {
+            this.dispatchBlastAction()
+        }
 
  
     }
@@ -163,9 +153,9 @@ export class BombObject {
             // this.scene.matter.world.off("collisionactive", this.handlePlayerCollision, this, false);
         }
 
-        if (this.selfDestroyOnHitTimer) {
-            this.selfDestroyOnHitTimer.destroy()
-        };
+        // if (this.selfDestroyOnHitTimer) {
+        //     this.selfDestroyOnHitTimer.destroy()
+        // };
 
         this.scene.events.off("update", this.update, this, false);
         this.scene.events.off("shutdown", this.destroy, this, false);
@@ -198,9 +188,8 @@ export class BombObject {
 
 
 
-    private setupSprite(spriteKey: string, x: number, y: number) {
-        debugger;
-        this.sprite = this.scene.matter.add.sprite(10, 10, 'bomb-drop', null, {shape: this.shapes['boom-drop-sprite'] });
+    private setupSprite(spriteKey: string, shapeObject: any, x: number, y: number) {
+        this.sprite = this.scene.matter.add.sprite(10, 10, 'bomb-drop', null, {shape: shapeObject });
 
         const { width, height } = this.sprite;
         const compoundBody = this.createSpriteBody(width, height);
@@ -225,7 +214,7 @@ export class BombObject {
         const compoundBody: MatterJS.Body = Body.create({
             parts: [mainBody, this.sensors.bottom, this.sensors.left, this.sensors.top, this.sensors.right],
             frictionStatic: 0,
-            frictionAir: 0.02,
+            frictionAir: 0.005,
             friction: 0.2
         });
         return compoundBody;
@@ -242,6 +231,7 @@ export class BombObject {
 
         
     }
+
 
 
     private listenToCollisionEvents() {
@@ -306,32 +296,39 @@ export class BombObject {
             if (!bodies) {
                 return;
             }
-            this.hitAction()
+            this.hitAccrued = true;
             // traceGroundTouch(playerBody, otherBody, pair);
             // traceSidesTouch(playerBody, otherBody, pair);
         });
     }
 
-    public hitAction() {
 
-        if(!this.hitAccrued && !this.isDestroyed) {
-            this.hitAccrued = true;
-            this.sprite.anims.play('blast', true);
+    public dispatchBlastAction() {
+        if(!this.blastDispatch) {
+            this.blastDispatch = true;
+            (new SequentialDelayActions()).run([
+                {
+                    delay: bombConfig.DELAY_MS_BLAST_AFTER_HIT,
+                    action: () => (  this.blastAction() ),
+                },
+                {
+                    delay: bombConfig.DELAY_MS_DESTROY_AFTER_BLAST,
+                    action: () => (  this.destroy() ),
+                },
 
-                // sprite.setVelocityY(-playerConfig.JUMP_VERTICAL_VELOCITY);
-            this.selfDestroyOnHitTimer = this.scene.time.addEvent({
-                delay: playerConfig.DELAY_MS_BETWEEN_JUMPS,
-                callback: () => (this.destroy())
-            });
+            ]);
             
+        }  
+    }
+    public blastAction() {
+        if(!this.isDestroyed) {            
+            this.sprite.anims.play('blast', true);
         }
-
-
     }
 
 }
 
-export interface PlayerObjectOptions {
+export interface ObjectOptions {
     spriteKey?: string,
     x: number,
     y: number,

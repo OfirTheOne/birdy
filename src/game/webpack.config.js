@@ -3,6 +3,7 @@ var pathToPhaser = path.join(__dirname, "/node_modules/phaser/");
 var phaser = path.join(pathToPhaser, "dist/phaser.js");
 
 module.exports = {
+  devtool: "source-map",
   entry: "./game.ts",
   output: {
     path: path.resolve(__dirname, "dist"),
@@ -18,7 +19,7 @@ module.exports = {
     contentBase: path.resolve(__dirname, "./"),
     publicPath: "/dist/",
     host: "127.0.0.1",
-    port: 8080,
+    port: 3000,
     open: true
   },
   resolve: {

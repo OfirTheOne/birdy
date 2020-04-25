@@ -6,7 +6,7 @@
 
 import "phaser";
 import { MainScene } from "./scenes/main-scene";
-// import VirtualJoystickPlugin from 'phaser3-rex-plugins/plugins/virtualjoystick-plugin.js';
+import { SplashScene } from "./scenes/splash.scene";
 
 // main game configuration
 const config: Phaser.Types.Core.GameConfig = {
@@ -14,15 +14,8 @@ const config: Phaser.Types.Core.GameConfig = {
   height: 600,
   type: Phaser.AUTO,
   parent: "game",
-  // plugins: [
-  //   {
-  //     key: 'rexVirtualJoystick',
-  //     plugin: VirtualJoystickPlugin,
-  //     start: true
-  //   }
-  // ],
   physics : { default: "matter", matter: { gravity: { y: 1 } } },
-  scene: MainScene,
+  scene: [ SplashScene, MainScene ],
 
 };
 

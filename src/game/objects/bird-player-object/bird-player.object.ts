@@ -1,12 +1,15 @@
 import 'phaser';
-import { Socket } from 'socket.io';
-import { config } from '../config';
+
+import { config } from '../../config';
 import { Dictionary } from 'ts-essentials';
 import { Body } from 'matter-js';
-import { MultiKey } from '../utils/multi-key';
+import { MultiKey } from '../../utils/multi-key';
 import { Game, Scene } from 'phaser';
-import { TransferredPlayer } from '../models/transferred-player';
-import { BombObject } from './bomb.object';
+import { PlayerObjectState } from '../../models/player-object-state';
+import { PoopBombObject } from './../poop-bomb-object/poop-bomb.object';
+import { RelativeStaticBlock } from '../../utils/relative-static-block';
+import { ConnectionManager } from '../../connection-manager';
+import { DebounceAction } from '../../utils/async-actions';
 
 const playerConfig = config['GAME_OBJECT']['BIRD_PLAYER'];
 
@@ -21,38 +24,37 @@ export class PlayerObjectResourceLoader {
     }
 }
 
+/** 
+ * @member sprite -
+ * the plyer sprite object.
+ *
+ * @member sensors -
+ * 'sensors' / MatterJS.Body serounding the sprite object to trace collisions.
+ *
+ * @member isTouching -
+ * flags for player body touching the serounding,
+ * communication between collisions events listening to updating the sprite.
+ * 
+ * @member keys -
+ * keys using to control the player sprite.
+ * 
+ * @member jumpCoolDownTimer - 
+ * 'jumpCoolDownTimer' event object, set the 'canJump' flag to true after 
+ * a delay from the last jump action.
+ */
 export class PlayerObject {
 
     lastEmittedX: number;
     lastEmittedY: number;
 
+    private connection = ConnectionManager.create()
     public isCurrentUser: boolean;
-    // public socket: Socket;
     public playerName: string;
     public playerNameObject: Phaser.GameObjects.Text;
 
-    /** @description
-     * the plyer sprite object.
-     */
     public sprite: Phaser.Physics.Matter.Sprite;
-
-    /** @description
-     * 'sensors' / MatterJS.Body serounding the sprite object to trace collisions.
-     */
     public sensors: { bottom: Body, left: Body, right: Body, top: Body };
-
-    /** @description
-     * flags for player body touching the serounding,
-     * communication between collisions events listening to updating the sprite.
-     */
-    private isTouching = { left: false, right: false, ground: false };
-
-    // ...
-    private isDestroyed = false;
-
-    /** @description
-     * keys using to control the player sprite.
-     */
+    
     private keys: { 
         leftInput: MultiKey; 
         rightInput: MultiKey; 
@@ -60,24 +62,26 @@ export class PlayerObject {
         runInput: MultiKey, 
         fireInput: MultiKey  
     };
-
-    /** @description
-     * 'canJump' flag is the sprite can jump.
-     */
-    private canJump: boolean;
-
-    private canFire: boolean;
-    /** @description
-     * 'jumpCooldownTimer' event object, set the 'canJump' flag to true after 
-     * a delay from the last jump action.
-     */
-    private jumpCooldownTimer: Phaser.Time.TimerEvent;
-    private fireCoolDownTimer: Phaser.Time.TimerEvent;
-
     
-    constructor(private scene: Phaser.Scene, options: PlayerObjectOptions, private socket: Socket) {
+    private canJump: boolean;
+    // private canFire: boolean;
+    private jumpCoolDownTimer: Phaser.Time.TimerEvent;
+    // private fireCoolDownTimer: Phaser.Time.TimerEvent;
+
+    private fireDebounceAction : DebounceAction;
+    
+    private isTouching = { left: false, right: false, ground: false };
+    private isDestroyed = false;
+    
+
+    private existingBombsList: Array<PoopBombObject> = []
+
+    constructor(private scene: Phaser.Scene, options: PlayerObjectOptions) {
         const { spriteKey = playerConfig.SPRITE_KEY, x, y, depth, currentUser = true } = options;
         this.isCurrentUser = currentUser;
+        this.lastEmittedX = x;
+        this.lastEmittedY = y;
+
         // Create the physics-based sprite that we will move around and animate
         this.setupSprite(spriteKey, x, y);
         this.setSpriteAnims(this.scene, spriteKey);
@@ -86,11 +90,19 @@ export class PlayerObject {
         this.initKeysInput();
 
         this.canJump = true;
-        this.canFire = true;
+        // this.canFire = true;
         this.listenToCollisionEvents();
         this.scene.events.on("update", this.update, this);
         this.scene.events.once("shutdown", this.destroy, this);
         this.scene.events.once("destroy", this.destroy, this);
+        // this.sprite.on('destroy')
+
+        this.fireDebounceAction = new DebounceAction(playerConfig['DELAY_MS_BETWEEN_FIRE']);
+        new RelativeStaticBlock(
+            this.scene, this.sprite, 
+            this.scene.add.text(x, y+50, this.connection.socketId), 
+            -20, -50
+        )
     }
 
     // #region - Basic Public Player Methods -
@@ -99,55 +111,27 @@ export class PlayerObject {
         if (this.isDestroyed) {
             return;
         }
-        const { 
-            isJumpKeyDown,
-            isLeftKeyDown,
-            isRightKeyDown,
-            isFireKeyDown,
-            isPlayerOnGround,
-            moveForce,
-            velocity,
-            x,
-            y
-        } =  this.getTransferredPlayerData();
+
+        const currentState = this.getObjectState()
         const sprite = this.sprite;
-        // const velocity = sprite.body?.['velocity'];
-        // const isPlayerOnGround = this.isTouching.ground;
-        // const isRunning = this.keys.runInput.isDown();
-        // const moveForce =
-        //     (isRunning && isPlayerOnGround) ? (playerConfig.BASIC_MOVE_FORCE) * 2 : // whan runnig make moving ligther
-        //         (!isPlayerOnGround ? playerConfig.BASIC_MOVE_FORCE * 0.2 : // on the air make moving heavier
-        //             playerConfig.BASIC_MOVE_FORCE); // on the ground & not running move normal
 
         if(this.isCurrentUser) {
 
-            if(isFireKeyDown && this.canFire) {
-                this.canFire = false;
-                new BombObject(this.scene, {x, y: (y + this.sprite.height)}, this.socket);
-                    // sprite.setVelocityY(-playerConfig.JUMP_VERTICAL_VELOCITY);
-                this.fireCoolDownTimer = this.scene.time.addEvent({
-                    delay: playerConfig.DELAY_MS_BETWEEN_JUMPS,
-                    callback: () => (this.canFire = true)
-                });
-                
-            }
+            this.existingBombsList = this.existingBombsList.length == 0 ? 
+                this.existingBombsList : 
+                this.existingBombsList.filter(bomb => bomb.isDestroyed != false)
 
-            if((this.lastEmittedX != sprite.x) || (this.lastEmittedY != sprite.y) || this.anyKeyDown()) {
-                this.emitPlayerData(this.getTransferredPlayerData())
+            if( 
+                //sprite['position'] && 
+                ((this.lastEmittedX != sprite.x) || (this.lastEmittedY != sprite.y) || this.anyKeyDown())
+            ) {
+                this.emitPlayerData(currentState)
             }
-            this.applyPlayerMovement(
-                sprite, 
-                isLeftKeyDown,
-                isRightKeyDown,
-                isJumpKeyDown,
-                isPlayerOnGround,
-                moveForce,
-                velocity
-            )
         }
+        this.sprite.emit('update');
     }
 
-    public getTransferredPlayerData(): TransferredPlayer {
+    public getObjectState(): PlayerObjectState {
 
         const sprite = this.sprite;
         
@@ -163,11 +147,13 @@ export class PlayerObject {
                     
         const position = sprite.body?.['position'];
         const { x,y } = position ?  sprite : { x: 0, y: 0 }
+
+        const needToFire = this.keys.fireInput.isDown();// && this.canFire
         return {
             isJumpKeyDown: this.keys.jumpInput.isDown(),
             isLeftKeyDown: this.keys.leftInput.isDown(),
             isRightKeyDown: this.keys.rightInput.isDown(),
-            isFireKeyDown: this.keys.fireInput.isDown(),
+            needToFire,
             isPlayerOnGround,
             moveForce,
             velocity,
@@ -177,29 +163,35 @@ export class PlayerObject {
         }
     }
 
-    public syncPlayer(data: TransferredPlayer) {
+    public syncPlayer(data: PlayerObjectState) {
 
-        if(!this.isCurrentUser) {
+        // if(!this.isCurrentUser) {
             this.sprite.setX(data.x)
             this.sprite.setY(data.y)
-            this.applyPlayerMovement(
+            this.applyObjectState(
                 this.sprite,
+                data.x,
+                data.y,
                 data.isLeftKeyDown,
                 data.isRightKeyDown,
                 data.isJumpKeyDown,
                 data.isPlayerOnGround,
+                data.needToFire,
                 data.moveForce,
                 data.velocity
             )
 
-        }
+        // }
     }
-    private applyPlayerMovement(
+    private applyObjectState(
         sprite: Phaser.Physics.Matter.Sprite,
+        x: number,
+        y: number,
         leftKeyDown: boolean,
         rightKeyDown: boolean,
         jumpKeyDown: boolean,
         isPlayerOnGround: boolean,
+        needToFire: boolean,
         moveForce: number,
         velocity?: any,
     ) {
@@ -207,8 +199,23 @@ export class PlayerObject {
             // debugger;
         }
 
-        if(!this.anyKeyDown()) {
+
+        // if(!this.anyKeyDown()) {
             sprite.anims.play('move-left', true);
+        // }
+
+        if(needToFire) {
+            // this.canFire = false;
+            this.fireDebounceAction.run(() => {
+                const bomb = new PoopBombObject(this.scene, {x, y: (y + this.sprite.height + 10)}, this.connection.socket)
+                this.existingBombsList.push(bomb);
+            })
+                // sprite.setVelocityY(-playerConfig.JUMP_VERTICAL_VELOCITY);
+            // this.fireCoolDownTimer = this.scene.time.addEvent({
+            //     delay: playerConfig.DELAY_MS_BETWEEN_JUMPS,
+            //     callback: () => (this.canFire = true)
+            // });
+            
         }
         if (leftKeyDown) {
             const animsKey = isPlayerOnGround ? 'move-left' : 'pose-left'
@@ -232,7 +239,7 @@ export class PlayerObject {
         if (jumpKeyDown /* && isPlayerOnGround && this.canJump */) {
             sprite.setVelocityY(-playerConfig.JUMP_VERTICAL_VELOCITY);
             this.canJump = false;
-            this.jumpCooldownTimer = this.scene.time.addEvent({
+            this.jumpCoolDownTimer = this.scene.time.addEvent({
                 delay: playerConfig.DELAY_MS_BETWEEN_JUMPS,
                 callback: () => (this.canJump = true)
             });
@@ -252,21 +259,21 @@ export class PlayerObject {
     }
     public destroy() {
         if (this.scene.matter.world) {
-            this.scene.matter.world.off("beforeupdate", this.resetTuching, this, false);
+            this.scene.matter.world.off("beforeupdate", this.resetTouching, this, false);
             // this.scene.matter.world.off("collisionstart", this.handlePlayerCollision, this, false);
             // this.scene.matter.world.off("collisionactive", this.handlePlayerCollision, this, false);
         }
 
-        if (this.jumpCooldownTimer) {
-            this.jumpCooldownTimer.destroy()
+        if (this.jumpCoolDownTimer) {
+            this.jumpCoolDownTimer.destroy()
         };
-        if (this.fireCoolDownTimer) {
-            this.fireCoolDownTimer.destroy()
-        };
+        // if (this.fireCoolDownTimer) {
+        //     this.fireCoolDownTimer.destroy()
+        // };
 
         this.scene.events.off("update", this.update, this, false);
-        this.scene.events.off("shutdown", this.destroy, this, false);
         this.scene.events.off("destroy", this.destroy, this, false);
+        this.scene.events.off("shutdown", this.destroy, this, false);
 
         this.isDestroyed = true;
 
@@ -275,6 +282,7 @@ export class PlayerObject {
         }
 
         this.sprite.destroy();
+        this.sprite.emit('destroy');
     }
 
     public freeze() {
@@ -395,13 +403,13 @@ export class PlayerObject {
 
     private listenToCollisionEvents() {
         // reset this isTouching flags before any collision event.
-        this.scene.matter.world.on("beforeupdate", this.resetTuching, this);
+        this.scene.matter.world.on("beforeupdate", this.resetTouching, this);
         this.scene.matter.world.on("collisionstart", this.handlePlayerCollision, this);
         this.scene.matter.world.on("collisionactive", this.handlePlayerCollision, this);
 
     }
 
-    private resetTuching() {
+    private resetTouching() {
         this.isTouching.ground = false;
         this.isTouching.left = false;
         this.isTouching.right = false;
@@ -462,56 +470,11 @@ export class PlayerObject {
         });
     }
 
-    public emitPlayerData(transferredPlayerData: TransferredPlayer) {
+    public emitPlayerData(objectState: PlayerObjectState) {
         // Emit the 'move-player' event, updating the player's data on the server
-        this.socket.emit('move-player', transferredPlayerData
-        /*
-        {
-            x: this.sprite.x,
-            y: this.sprite.y,
-            angle: this.sprite.rotation,
-            playerName: {
-                name: this.playerName//.text,
-                // x: this.playerName.x,
-                // y: this.playerName.y
-            },
-            //   speed: {
-            //     value: this.speed,
-            //     x: this.speedText.x,
-            //     y: this.speedText.y
-            //   }
-        }*/
-        )
+        this.connection.emit('change-player-state', objectState)
     }
 
-    public static createText(game: Scene, { x, y }, text: string) {
-        return game.add.text(x, y, text, {
-            fontSize: '12px',
-            fill: '#FFF',
-            align: 'center'
-        })
-    }
-
-    public updatePlayerName(name = this.socket.id, x = this.sprite.x - 57, y = this.sprite.y - 59) {
-        // Updates the player's name text and position
-        this.playerNameObject.text = String(name)
-        this.playerNameObject.x = x
-        this.playerNameObject.y = y
-        // Bring the player's name to top
-        // this.scene.matter.world..bringToTop(this.playerName)
-    }
-    public updatePlayerStatusText(status, x, y, text) {
-        // // Capitalize the status text
-        // const capitalizedStatus = status[0].toUpperCase() + status.substring(1)
-        // let newText = ''
-        // // Set the speed text to either 0 or the current speed
-        // this[status] < 0 ? this.newText = 0 : this.newText = this[status]
-        // // Updates the text position and string
-        // text.x = x
-        // text.y = y
-        // text.text = `${capitalizedStatus}: ${parseInt(this.newText)}`
-        // game.world.bringToTop(text)
-    }
 }
 
 export interface PlayerObjectOptions {
